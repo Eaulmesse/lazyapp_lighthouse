@@ -7,6 +7,7 @@ import axios from 'axios';
 interface LighthouseRequest {
   url: string;
   options?: any;
+  authToken?: string; // Token d'authentification optionnel
 }
 
 const PORT = process.env.PORT || 3001;
@@ -33,7 +34,7 @@ async function executeLighthouse(url: string, options: any = {}) {
   }
 }
 
-async function sendResultsToAPI(testId: string, results: any) {
+async function sendResultsToAPI(testId: string, results: any, authToken?: string) {
   try {
     // Log détaillé des résultats
     console.log('📊 Résultats Lighthouse pour', testId, ':');
@@ -59,12 +60,38 @@ async function sendResultsToAPI(testId: string, results: any) {
     console.log(`  Taille totale: ${totalSize}`);
     console.log('---');
 
+    // Nettoyer les résultats pour réduire la taille du payload
+    const cleanedResults = {
+      ...results,
+      // Supprimer les screenshots qui prennent beaucoup de place
+      audits: Object.fromEntries(
+        Object.entries(results.audits || {}).map(([key, audit]: [string, any]) => {
+          if (audit.details?.type === 'filmstrip' || audit.details?.type === 'screenshot') {
+            return [key, { ...audit, details: { ...audit.details, items: [] } }];
+          }
+          return [key, audit];
+        })
+      )
+    };
+
+    // Préparer les headers pour l'API
+    const headers: any = {
+      'Content-Type': 'application/json'
+    };
+    
+    // Ajouter le token d'authentification s'il est fourni
+    if (authToken) {
+      headers['Authorization'] = `Bearer ${authToken}`;
+      console.log('🔐 Token d\'authentification ajouté à la requête API');
+    }
+    
     // Envoi à l'API
-    await axios.post(`${API_URL}/api/lighthouse/results`, {
+    await axios.post(`${API_URL}/api/audit`, {
       testId,
-      results,
+      url: results.finalUrl || results.requestedUrl,
+      results: cleanedResults,
       timestamp: new Date().toISOString()
-    });
+    }, { headers });
     
     console.log('✅ Résultats envoyés avec succès à l\'API');
   } catch (error) {
@@ -110,6 +137,15 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
     if (req.method === 'POST' && path === '/analyze') {
       const body: LighthouseRequest = await parseJSONBody(req);
       
+      // Récupérer le token depuis les headers ou le body
+      const authHeader = req.headers['authorization'];
+      const tokenFromHeader = authHeader && authHeader.startsWith('Bearer ') ? authHeader.substring(7) : null;
+      const authToken = body.authToken || tokenFromHeader || undefined;
+      
+      if (authToken) {
+        console.log('🔐 Token d\'authentification détecté');
+      }
+      
       if (!body.url) {
         return sendJSONResponse(res, { error: 'URL requise' }, 400);
       }
@@ -136,7 +172,7 @@ const server = createServer(async (req: IncomingMessage, res: ServerResponse) =>
       executeLighthouse(body.url, body.options)
         .then(results => {
           console.log('🎯 Test Lighthouse terminé pour', testId);
-          sendResultsToAPI(testId, results);
+          sendResultsToAPI(testId, results, authToken);
         })
         .catch(error => {
           console.error('❌ Erreur Lighthouse pour', testId, ':', error.message);
